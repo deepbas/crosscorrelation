@@ -1,0 +1,442 @@
+---
+title: "Function TEst"
+author: "Deepak Bastola"
+date: "December 13, 2020"
+output:
+  pdf_document: default
+  html_document: default
+---
+
+```{r, eval=FALSE, warning=FALSE}
+# Call libraries
+library(fields)
+library(geoR)
+library(MBA)
+library(spBayes)
+library(mcmcse)
+library(batchmeans)
+library(Matrix)
+library(parallel)
+library(elasticnet)
+library(mAr)
+library(matrixcalc)
+```
+
+```{r,eval=FALSE, warning=FALSE}
+#read data
+data("NETemp.dat")
+ne.temp <- NETemp.dat
+ne.temp <- ne.temp[ne.temp[, "UTMX"] > 5500000 & 
+                     ne.temp[, "UTMY"] > 3e+06, ]
+y.t <- ne.temp[, 4:27]
+N.t <- ncol(y.t)
+n <- nrow(y.t)
+coords <- as.matrix(ne.temp[,c("UTMX","UTMY")]/1000)
+max.d <- max(iDist(coords))
+
+#Prior specification
+p <- 2
+starting <- list(beta = rep(0, N.t * p), 
+                 phi = rep(3/(0.5 * max.d), N.t), 
+                 sigma.sq = rep(2, N.t), 
+                 tau.sq = rep(1, N.t), 
+                 sigma.eta = diag(rep(0.01,p)))
+
+tuning <- list(phi = rep(0.75, N.t))
+
+priors <- list(beta.0.Norm = list(rep(0, p), diag(1000, p)), 
+               #phi.Unif = list(rep(3/(0.9 *max.d), N.t),
+               #rep(3/(0.05 * max.d), N.t)),
+               phi.Unif = list(rep(0.001, N.t), rep(0.03, N.t)),
+               sigma.sq.IG = list(rep(2, N.t), rep(10, N.t)), 
+               tau.sq.IG = list(rep(2, N.t), rep(5, N.t)),
+               sigma.eta.IW = list(2, diag(0.01, p)))
+
+# modeling using spDyLM
+ncores <- detectCores()
+mods <- mclapply(paste(colnames(y.t), "elev", sep = "~"), 
+                 as.formula, mc.cores = ncores)
+
+n.samples <- 5e5
+m.1 <- spDynLM(mods, data = cbind(y.t, ne.temp[, "elev", drop = FALSE]),
+               coords = coords,
+               starting = starting, 
+               tuning = tuning, 
+               priors = priors,
+               cov.model = "exponential", 
+               n.samples = n.samples, 
+               get.fitted = TRUE,
+               verbose = FALSE)
+
+beta <- m.1$p.beta.samples
+theta <- m.1$p.theta.samples
+sigma.eta <- m.1$p.sigma.eta.samples[,-2]
+u.random <- m.1$p.u.samples
+
+beta.0 <- beta[,grep("Intercept", colnames(beta))]
+beta.1 <- beta[,grep("elev", colnames(beta))]
+sigma.sq <- theta[,grep("sigma.sq", colnames(theta))]
+tau.sq <- theta[,grep("tau.sq", colnames(theta))]
+phi <- theta[,grep("phi", colnames(theta))]
+
+chain <- cbind(beta0 = beta.0, beta1= beta.1, 
+               sigma.sq = sigma.sq, tau.sq = tau.sq,
+               phi = phi, sigma.eta = sigma.eta)
+
+multess <- multiESS(chain)
+
+sigma.bm <- mcse.multi(chain)
+corr.bm <- cov2cor(sigma.bm[[1]])
+
+plot( confRegion(sigma.bm, which=c(1,2), level = 0.95), type = "l")
+
+pca <- function(p, corr.bm){
+pc <- prcomp(corr.bm , rank. = p)
+
+#percent of variance explained
+var.explained <- cumsum(pc$sdev^2/sum(pc$sdev^2))[p]
+
+#choose p linear combinations of columns
+PC <- mclapply(1:p, function(i) pc[[2]][,i],mc.cores = ncores)
+#function to estimate the linear combinations, each PCs
+g <- mclapply(1:p, function(i) function(x) return(PC[[i]]%*%x), 
+              mc.cores = ncores)
+chain.PCA <- mclapply(1:p, function(i) apply(chain,1,g[[i]]),
+                      mc.cores = ncores)
+chain.final.PCA <-matrix(unlist(chain.PCA), ncol = p, byrow = FALSE)
+multess.PCA <- multiESS(chain.final.PCA)
+
+#volume of confidence region
+vol.PCA <- mcse.multi(chain.final.PCA)$vol
+vol.noPCA <- mcse.multi(chain)$vol
+  
+return(list(p = p, percent.var = var.explained, rbind(vol.PCA, vol.noPCA),
+            rbind(mult_PCA=multess.PCA, mult_noPCA=multess))
+)
+}
+
+sparsepca <- function(p,sparsity, corr.bm){
+  sPCA <- spca(corr.bm, p, type = "Gram", 
+               sparse = "varnum", para = rep(sparsity,p), use.corr = TRUE)
+  
+#choose p linear combinations of columns
+PC <- mclapply(1:p, function(i) sPCA$loadings[,i],mc.cores = ncores)
+  
+  
+#function to estimate the linear combinations, each PCs
+g <- mclapply(1:p, function(i) function(x) return(PC[[i]]%*%x),mc.cores = ncores)
+chain.PCA.sp <- mclapply(1:p, function(i) apply(chain,1,g[[i]]),mc.cores = ncores)
+chain.final.PCA.sp <-matrix(unlist(chain.PCA.sp), ncol = p, byrow = FALSE)
+  
+multess.PCA.sp <- multiESS(chain.final.PCA.sp)
+ 
+#volume of confidence region
+vol.PCA.sp <- mcse.multi(chain.final.PCA.sp)$vol
+vol.noPCA <- mcse.multi(chain)$vol
+  
+return(list(p = p, sparse = sparsity, rbind(vol.PCA.sp, vol.noPCA),
+              rbind(mult_PCA_sp = multess.PCA.sp, mult_noPCA=multess))
+  )
+}
+
+```
+
+
+```{r, eval=FALSE, warning=FALSE}
+#Univariate AR(1) model
+ar1sim <- function (n, rho) {
+  vec <- vector("numeric", n)
+  vec[1] <- 0
+  for (i in 2:n){vec[i] <- rho * vec[i - 1] + rnorm(n=1, mean = 0, sd = 1)}
+  vec
+}
+
+n <- 1e5
+rho <- 0.5
+out <- ar1sim(n, rho)
+
+# batch size
+b <- c(n^(1/3), n^(5/12), n^(1/2))
+
+sigma.true <- 1/(1 - rho^2)
+sigma <- lapply(1:length(b), function(i) sqrt(n)*mcse(x = out, method = "bartlett", size = b[i])$se)
+
+#weighted average
+sigma.avg <- (sigma[[1]]*b[1] + sigma[[2]]*b[2] + sigma[[3]] * b[3])/(sum(b))
+
+#function to calculate batch means univariate
+ubm <- function(out, b){
+  n <- length(out)
+  a <- floor(n/b)
+  k <- seq(1,b)
+  l <- seq(0,a-1) 
+
+  #overall mean
+  y.bar <- mean(out)
+  #create index
+  idx <- sapply(l, function(i) i*b + k)
+  #batches and batch means
+  y.l <- sapply(1:a, function(i) mean(out[idx[i]]))  
+  #sum of square deviations
+  sigma <- (b/(a-1)) * Reduce('+', sapply(1:a, 
+        function(i) (y.l[i]-y.bar)^2))
+sigma 
+}
+
+#univariate obm 
+uobm <- function(out, b){
+  n <- length(out)
+  a <- n - b + 1
+  k <- seq(1,b)
+  l <- seq(0,n-b)  
+  
+  #overall mean
+  y.bar <- mean(out)
+  #create index
+  idx <- sapply(l, function(i) i + k)
+  #batches and batch means
+  y.l <- sapply(1:a, function(i) mean(out[idx[i]]))  
+  #sum of square deviations
+  sigma <- ((n*b)/((n-b)*(n-b+1))) * Reduce('+', sapply(1:a, 
+        function(i) (y.l[i]-y.bar)^2))
+sigma 
+}
+
+```
+
+```{r, eval=FALSE, warning=FALSE}
+# function to calculate optimal batch size
+
+ar1.opt.batch <- function(n, rho){
+  out <- ar1sim(n, rho)
+  
+  # optimal bandwidth selection / Theoretical Flegal and Jones (2010)
+  sigma.t <- 1/(1-rho)^2
+  tau.t <- 2*rho/((1-rho^2)*(1-rho)^2)
+
+  # Theoretical batch sizes
+  b.coef <- ((tau.t^2)/(sigma.t^4))^(1/3)
+  b.opt.th <- floor(b.coef*n^(1/3))
+
+ # MSE minimization using b= c*n^1/3
+
+  b.grid <- seq(0.1,0.9,0.01)*n^{1/3}
+  sigma.bm <- sapply(b.grid, function(i) ubm(out, i))
+
+  #without calculating the coefficient from theory
+  mse <- (sigma.bm - sigma.t)^2
+  idx <- which.min(mse)
+  b.opt.mse <- floor(b.grid[idx])
+
+return(list(b.theory = b.opt.th, b.mse.min = b.opt.mse))
+}
+
+############RESULTS################
+
+#slow mixing
+out.slow <- ar1.opt.batch(8e5, 0.9)
+
+#fast mixing
+out.fast <- ar1.opt.batch(1e3, 0.5)
+
+#optimal batch size from mse minimization
+b.optimal <- function(p){
+  b.grid <- seq(0.01,0.6,0.01)*n^(1/3)
+  sigma.bm <- sapply(b.grid, function(i) ubm(chain[,p], i))
+  mse <- (sigma.bm - sigma.true[p])^2
+  idx <- which.min(mse)
+  b.opt.mse <- floor(b.grid[idx])
+b.opt.mse
+}
+
+```
+
+
+```{r, eval=FALSE, warning=FALSE}
+#function to calculatemultivariate batch means
+mbm <- function(chain, b){
+  n <- nrow(chain)
+  a <- floor(n/b)
+  k <- seq(1,b)
+  l <- seq(0,a-1) 
+
+  #overall mean
+  y.bar <- apply(chain, 2, mean)
+  
+  #create index
+  idx <- sapply(l, function(i) i*b + k)
+  #batches and batch means
+  y.l <- lapply(1:a, function(i) apply(chain[idx[,i],], 2, mean))  
+  #sum of square deviations
+  sigma <- (b/(a-1)) * Reduce('+', lapply(1:a, 
+        function(i) (y.l[[i]]-y.bar)%*%t(y.l[[i]]-y.bar)))
+sigma 
+}
+
+```
+
+```{r, eval=FALSE, warning=FALSE}
+#function to calculate multivariate overlapping batch means
+obm <- function(chain, b){
+  a <- n - b + 1
+  k <- seq(1,b)
+  l <- seq(0,n-b)   
+
+  #overall mean
+  y.bar <- apply(chain, 2, mean)  
+  #create index
+  idx <- sapply(l, function(i) i + k)
+  #batches and batch means
+  y.l <- lapply(1:a, function(i) apply(chain[idx[,i],], 2, mean))  
+  #sum of square deviations
+  sigma <- ((n*b)/((n-b)*(n-b+1))) * Reduce('+', lapply(1:a, 
+        function(i) (y.l[[i]]-y.bar)%*%t(y.l[[i]]-y.bar)))
+sigma 
+}
+
+```
+
+
+
+
+```{r, eval=FALSE, warning=FALSE}
+# multivariate - BM
+
+# dimension of Markov Chain
+p <- 20
+n <- 1e5
+
+dim <- 1:p
+coef <- 0.9
+H <- abs(outer(dim, dim, "-"))
+omega <-  coef^H
+
+## Making correlation matrix VAR(1) model for #slow-mixing chain
+ 
+rho <- 0.71 + 0.19*rev(seq(0,p-1))/(p-1) 
+phi <- diag(rho)
+
+# Alternative Method
+  #A <- matrix(rnorm(p*p,mean=0,sd=1), p, p)
+  #B <- A%*%t(A)
+  #m <- max(eigen(B)$values)
+  #phi <- B/(m+1)
+
+# Population covariance
+scratch <- diag(p^2) - kronecker(phi,phi)
+V.s <- solve(scratch)%*%c(omega)
+V <- matrix(V.s, nrow = p, byrow = TRUE)
+Sigma <- solve(diag(p)-phi)%*%V + V%*%solve(diag(p)-phi) -V
+sigma.true <- diag(Sigma)
+
+chain <- as.matrix(mAr.sim(rep(0,p), phi, omega, N = n))
+#load(file = "/home/deepak/Desktop/Research/Codes/VarProcess/chainloe1e6.rda")
+
+# optimal bandwidth selection / Theoretical Flegal and Jones (2010)
+sigma.t <- 1/(1-rho)^2
+tau.t <- 2*rho/((1-rho^2)*(1-rho)^2)
+
+b.coef <- ((tau.t^2)/(sigma.t^4))^(1/3)
+b.opt.th <- floor(b.coef*n^(1/3))
+b <- b.opt.th
+
+#average
+b.mean <- mean(b)
+#maximum
+b.max <- max(b);b.max
+#geometric_mean
+gm = function(a){prod(a)^(1/length(a))}
+b.gm <- gm(b);b.gm
+
+
+Sigma.b <- lapply(1:p, function(i) mbm(chain, b[i]))
+
+factors.l1norm <- sapply(1:p, function(i) (sum(eigen(Sigma)[[1]])/sum(eigen(Sigma.b[[i]])[[1]])))
+factors.max.eig <- sapply(1:p, function(i) (eigen(Sigma)[[1]][1]/eigen(Sigma.b[[i]])[[1]][1]))
+
+Sigma.l1norm <- lapply(1:p, 
+              function(i) factors.l1norm[i]*Sigma.b[[i]])
+
+Sigma.max.eig <- lapply(1:p, 
+              function(i) factors.max.eig[i]*Sigma.b[[i]])
+
+# Simple linear combination
+Sigma.l1norm.f <- Reduce('+', Sigma.l1norm)/p
+Sigma.max.eig.f <- Reduce('+', Sigma.max.eig)/p
+
+#Compare MSE
+MSE.l1norm.f <- 1/p^2 * sum((Sigma.l1norm.f - Sigma)^2); MSE.l1norm.f
+MSE.max.eig.f <- 1/p^2 * sum((Sigma.max.eig.f - Sigma)^2); MSE.max.eig.f
+
+# Var-Cov Decomposition Method
+corr.b <- lapply(1:p, function(i){ 
+                  V <- diag(diag(Sigma.b[[i]]), p, p)
+                  R <- solve(V)^(1/2)%*%Sigma.b[[i]]%*%solve(V)^(1/2)
+                  R})
+
+#average correlation
+corr.b.avg <- Reduce('+', corr.b)/p
+diag.sigma.b <- sapply(1:p, function(i) diag(Sigma.b[[i]])[i])
+
+#scaled diagonals
+D.max.eig <- diag(diag.sigma.b*factors.max.eig)
+D.sum.eig <- diag(diag.sigma.b*factors.l1norm)
+
+Sigma.sum <- sqrt(D.sum.eig)%*%corr.b.avg%*%sqrt(D.sum.eig)
+Sigma.max <- sqrt(D.max.eig)%*%corr.b.avg%*%sqrt(D.max.eig)
+
+MSE.max <- 1/p^2 * sum((Sigma.max - Sigma)^2); MSE.max
+MSE.sum <- 1/p^2 * sum((Sigma.sum - Sigma)^2); MSE.sum
+
+# Spectral Variance Estimator and batch size selection method
+b.coef.sv <- ((3*tau.t^2)/(2*sigma.t^4))^(1/3)
+b.opt.th.sv <- floor(b.coef.sv*n^(1/3))
+b.sv <- b.opt.th.sv
+
+Sigma.sv <- lapply(1:p, function(i) 
+  2*mcse.multi(chain, method = "bartlett", size=b.sv[i])[[1]]
+  - mcse.multi(chain, method = "bartlett", size=b.sv[i]/2)[[1]])
+
+factors.l1norm.sv <- sapply(1:p, function(i) (sum(eigen(Sigma)[[1]])/sum(eigen(Sigma.sv[[i]])[[1]])))
+factors.max.eig.sv <- sapply(1:p, function(i) (eigen(Sigma)[[1]][1]/eigen(Sigma.sv[[i]])[[1]][1]))
+
+Sigma.l1norm.sv <- lapply(1:p, 
+              function(i) factors.l1norm.sv[i]*Sigma.sv[[i]])
+
+Sigma.max.eig.sv <- lapply(1:p, 
+              function(i) factors.max.eig.sv[i]*Sigma.sv[[i]])
+
+# Simple linear combination
+Sigma.l1norm.sv.f <- Reduce('+', Sigma.l1norm.sv)/p
+Sigma.max.eig.sv.f <- Reduce('+', Sigma.max.eig.sv)/p
+
+#Compare MSE
+MSE.l1norm.sv.f <- 1/p^2 * sum((Sigma.l1norm.sv.f - Sigma)^2); MSE.l1norm.sv.f
+MSE.max.eig.sv.f <- 1/p^2 * sum((Sigma.max.eig.sv.f - Sigma)^2); MSE.max.eig.sv.f
+
+#Var-Cov Decomposition Method
+corr.sv <- lapply(1:p, function(i) { 
+                    V <- diag(diag(Sigma.sv[[i]]), p, p)
+                    R <- solve(V)^(1/2)%*%Sigma.sv[[i]]%*%solve(V)^(1/2)
+                    R}
+)
+
+#average correlation
+corr.sv.avg <- Reduce('+', corr.sv)/p
+
+diag.sigma.sv <- sapply(1:p, function(i) diag(Sigma.sv[[i]])[i])
+
+#scaled diagonals
+D.max.eig.sv <- diag(diag.sigma.sv*factors.max.eig.sv)
+D.sum.eig.sv <- diag(diag.sigma.sv*factors.l1norm.sv)
+
+
+Sigma.adj.sum <- sqrt(D.sum.eig.sv)%*%corr.sv.avg%*%sqrt(D.sum.eig.sv)
+Sigma.adj.max <- sqrt(D.max.eig.sv)%*%corr.sv.avg%*%sqrt(D.max.eig.sv)
+MSE.adj.sum <- 1/p^2 * sum((Sigma.adj.sum - Sigma)^2); MSE.adj.sum
+MSE.adj.max <- 1/p^2 * sum((Sigma.adj.max - Sigma)^2); MSE.adj.max
+
+
+```
+ 
+
