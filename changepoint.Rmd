@@ -1,0 +1,397 @@
+---
+title: "Metropolis Hasting Change Point"
+author: "Deepak Bastola"
+date: "May 23, 2018"
+output:
+  pdf_document: default
+  word_document: default
+  html_document: default
+---
+
+```{r, message=FALSE, warning=FALSE}
+set.seed(1234)
+library(mcmcse)
+library(batchmeans)
+library(parallel)
+
+data <- read.table("/home/deepak/Desktop/Research/MyDissertation/Codes-Research/ChangePoint/changepoint.dat", 
+                   header = TRUE)
+data <- as.matrix(data)
+Y <- data[,2]
+
+k.guess = 10
+
+mhsampler <- function(Y, n.iterations, kfixed=FALSE){
+    n <- length(Y)
+    mchain <- matrix(NA, n.iterations, 5)
+    acc <- 0 
+    # starting values
+    if (kfixed) kinit <- k.guess # start the chain at the guess value
+    else kinit <- floor(n/2) # midpoint
+    mchain[1,] <- c(4.45,9,kinit,.10,0.1)
+    
+    for (i in 2:n.iterations)
+      {
+        ## parameters at last iterations
+        currtheta <- mchain[i-1,1]
+        currlambda <- mchain[i-1,2]
+        currk <- mchain[i-1,3]
+        currb1 <- mchain[i-1,4]
+        currb2 <- mchain[i-1,5]
+        
+        ## sample from full conditional distribution of theta (Gibbs update)
+        currtheta <- rgamma(1,shape=sum(Y[1:currk])+0.5, 
+                            scale=currb1/(currk*currb1+1))
+        
+        ## sample from full conditional distribution of lambda (Gibbs update)
+        currlambda <- rgamma(1,shape=sum(Y[(currk+1):n])+0.5, 
+                             scale=currb2/((n-currk)*currb2+1))
+        
+        ## sample from full conditional distribution of k (Metropolis-Hastings update)
+        
+        propk <- sample(x=seq(2,n-1), size=1) # draw one sample at random from uniform{2,..(n-1)}
+
+        if (kfixed) {
+          currk <- KGUESS
+        } else {
+          ## Metropolis accept-reject step (in log scale)
+          logMHratio <- sum(Y[1:propk])*log(currtheta)+sum(Y[(propk+1):n])*
+                        log(currlambda)-propk*currtheta- (n-propk)*currlambda - 
+                            (sum(Y[1:currk])*log(currtheta)+sum(Y[(currk+1):n])*
+                            log(currlambda)-currk*currtheta- (n-currk)*currlambda)
+          logalpha <- min(0,logMHratio) # alpha = min(1,MHratio)
+          if (log(runif(1))<logalpha) # accept if unif(0,1)<alpha, i.e. accept with
+            {                         # probability alpha, else stay at current state
+              acc <- acc + 1 # increment count of accepted proposals
+              currk <- propk
+            }
+        }
+        
+        ## sample from full conditional distribution of b1 (Gibbs update): draw from Inverse Gamma
+        currb1 <- 1/rgamma(1,shape=1.5, scale=1/(currtheta+1))
+        
+        ## sample from full conditional distribution of b2 (Gibbs update): draw from Inverse Gamma
+        currb2 <- 1/rgamma(1,shape=1.5, scale=1/(currlambda+1))
+        
+        ## update chain with new values
+        mchain[i,] <- c(currtheta,currlambda,currk,currb1,currb2)
+      }
+
+    #cat("Markov chain algorithm ran for", MCMCiterations, "iterations ")
+   # if (!kfixed) cat("\n acc. rate for k: ", acc/(MCMCiterations-1))
+    return(mchain)
+  }
+  
+chain <- mhsampler(Y,10000)
+
+boxplot(chain, horizontal = TRUE)
+
+
+```
+
+
+
+```{r}
+#out <- as.matrix(mAr.sim(rep(0,p), phi, omega, N = n))
+
+#b <- floor(sqrt(nrow(out)))
+#sigma.bm <- mcse.multi(x = out)[[1]]
+#sigma.wbm <- 2* mcse.multi(out, method = "bartlett", size = b)[[1]] - mcse.multi(out, method = "bartlett", size = b/2)[[1]]
+#corr.wbm <-  cov2cor(sigma.wbm)
+#eigen.wbm <- eigen(corr.wbm)[[1]]
+
+out<- scale(chain, center = TRUE, scale = FALSE)
+n <- 1000
+t.out <- t(out)
+x <- as.vector(t.out)
+dn <- length(x)
+D <- matrix(x, nrow = dn, ncol = 1)
+
+#covariance matrix
+#T.dn <- (1/(n))*D%*%t(D)
+#not a consistent estimator
+
+y <- acf(out, lag.max = n-1, type = "covariance", plot = FALSE)
+autocov <- y$acf 
+
+#define tapered function
+taper <- function(x){
+  if (abs(x)<=1){res <- 1}
+  if (abs(x)>1 & abs(x)<=2){res <- 2 - abs(x)}
+  if (abs(x)>2){res <- 0}
+  return(res)
+}
+
+#calculate k_l
+l = 2
+k.l <-lapply(1:n, function(i) taper((i-1)/l))
+T.kl <-lapply(1:n, function(i) autocov[i,,]*k.l[[i]])
+
+toeplitz.block <- function(blocks) {
+    l <- length(blocks)
+    m.str <- toeplitz(1:l)
+
+    res <- lapply(1:l,function(k) {
+        res <- matrix(0,ncol=ncol(m.str),nrow=nrow(m.str))
+        res[m.str == k] <- 1
+        res %x% blocks[[k]]
+    })
+
+    Reduce("+",res)
+}  
+
+T.kl.mat <- toeplitz.block(T.kl)
+xx <- diag(T.kl.mat)
+V.mat <- diag(xx, dn, dn)
+
+R.kl <- solve(V.mat)^(1/2)%*%T.kl.mat%*%solve(V.mat)^(1/2)
+
+#spectral factorization
+R.eigen <- eigen(R.kl)
+eigenvec <- R.eigen$vectors
+
+#adjustment
+eps <- 1
+beta <- 1
+r.i <- R.eigen$values
+r.ie <- sapply(1:dn, function(i) max(r.i[i], eps*n^{-beta}))
+
+T.kle <- sqrt(V.mat)%*%(eigenvec%*%diag(r.ie, dn, dn)%*%t(eigenvec))%*%sqrt(V.mat)
+
+
+
+```
+
+
+
+
+
+```{r}
+
+pdf("tsplot.pdf")
+ts.plot(Y,main="Time series plot of change point data", lty=3)
+dev.off()
+
+bm.est <- apply(chain, 2, function(i) bm(i)$est)
+bm.est
+
+bm.se <- apply(chain, 2, function(i) bm(i)$se)
+bm.se
+
+#standard errors - cov mat
+mcse.matrix <- mcse.mat(chain)
+mcse.matrix
+
+#effective sample size
+ess <- lapply(1:5, function(i) ess(chain[,i]))
+ess
+
+#relative tolerance eps = 0.05
+miness <- minESS(p=5, eps = 0.05, alpha = 0.05)
+miness
+
+#multivariate sample size
+multess <- multiESS(chain)
+multess
+
+chain.new <- mhsampler(Y, 32000)
+
+#recalculate ess
+multess.final <- multiESS(chain.new)
+multess.final
+
+pdf("acfplots.pdf")
+par(mfrow = c(3,2))
+acf(chain.new[,1],main="acf plot for theta")
+acf(chain.new[,2],main="acf plot for lambda")
+acf(chain.new[,3],main="acf plot for k")
+acf(chain.new[,4],main="acf plot for b1")
+acf(chain.new[,5],main="acf plot for b2")
+par(mfrow=c(1,1))
+dev.off()
+
+#estimates with their standard errors
+mcse.matrix <- mcse.mat(chain.new)
+mcse.matrix
+
+#output analysis
+```
+
+```{r}
+#batch means
+sigma.bm <- mcse.multi(chain.new)
+sigma.bm[[1]]
+corr.bm <- cov2cor(sigma.bm[[1]])
+corr.bm
+eigen.bm <- eigen(corr.bm)[[1]]
+
+#weighted batch means
+b <- floor(sqrt(nrow(chain.new)))
+sigma.wbm <- 2* mcse.multi(chain.new, method = "bartlett", size = b)[[1]]- mcse.multi(chain.new, method = "bartlett", size = b/2)[[1]]
+sigma.wbm
+corr.wbm <- cov2cor(sigma.wbm)
+corr.wbm
+eigen.wbm <- eigen(corr.wbm)[[1]]
+
+#shrink estimation
+nlinshrink_X <-  nlshrink_cov(chain.new)
+corr.shrink <- cov2cor(nlinshrink_X)
+eigen.shrink <- eigen(corr.shrink)[[1]]
+
+pdf("eigen.pdf")
+plot(eigen.shrink, type = 'l', col = 1, lty = 1, ylim = c(0, 3))
+lines(eigen.bm, col =2, lty =2)
+lines(eigen.wbm, col =3, lty = 3)
+legend("topright", col = c(1,2,3), legend = c("Shrinked", "Batch Means", "wBatch Means"), lty = c(1,2,3))
+dev.off()
+
+```
+
+
+```{r}
+#non-linear shrinkage
+linshrink_X <- linshrink_cov(chain.new)
+nlinshrink_X <-  nlshrink_cov(chain.new)
+corr.shrink <- cov2cor(nlinshrink_X)
+
+#Principal Components with shrinked estimator
+ncores <- detectCores()
+pc.shrink <- prcomp(corr.shrink)
+
+# components and explained variances
+var.shrink <- cumsum(pc.shrink$sdev^2/sum(pc.shrink$sdev^2))
+
+#scree and variance plot
+pdf("scree_var_shrink.pdf")
+par(mfrow = c(1,2))
+plot(pc.shrink, type = "l", main = "Scree Plot")
+plot(var.shrink, type = "l", main = "Percent Variance Explained")
+par(mfrow = c(1,1))
+dev.off()
+
+#num.PC <- num of PCs
+
+pca.shrink <- function(num.PC, corr.shrink){
+pc <- prcomp(corr.shrink , rank. = num.PC)
+PC <- mclapply(1:num.PC, function(i) pc[[2]][,i], mc.cores = ncores)
+g <- mclapply(1:num.PC, function(i) function(x) return(PC[[i]]%*%x), 
+              mc.cores = ncores)
+
+chain.scratch <- mclapply(1:num.PC, function(i) apply(chain.new,1,g[[i]]),mc.cores = ncores)
+chain.final <-matrix(unlist(chain.scratch), ncol = num.PC, byrow = FALSE)
+return(chain.final)
+}
+
+chain.PCA.shrink <- mclapply(1:5, function(i) pca.shrink(i, corr.shrink), mc.cores = ncores)
+
+multess <- mclapply(1:5, function(i) multiESS(chain.PCA.shrink[[i]]), mc.cores = ncores)
+miness <- mclapply(1:5, function(i) minESS(i, 0.05, 0.05))
+
+out <- do.call(cbind, list(multess, miness))
+colnames(out) <- c("MultiESS", "MinESS")
+out
+
+#3 PC components is appropriate
+#output analysis
+
+pdf("acfplots_pca_shrink.pdf")
+par(mfrow = c(2,3))
+acf(chain.PCA.shrink[[3]][,1],main="acf plot for PC1")
+acf(chain.PCA.shrink[[3]][,2],main="acf plot for PC2")
+acf(chain.PCA.shrink[[3]][,3],main="acf plot for PC3")
+estvssamp(chain.PCA.shrink[[3]][,1],main = "PC1 vs sample size")
+estvssamp(chain.PCA.shrink[[3]][,2],main = "PC2 vs sample size")
+estvssamp(chain.PCA.shrink[[3]][,3],main = "PC3 vs sample size")
+par(mfrow=c(1,1))
+dev.off()
+
+```
+
+```{r, message=FALSE, warning=FALSE}
+#Principal Component Analysis
+ncores <- detectCores()
+pc.trial <- prcomp(corr.wbm)
+
+# components and explained variances
+var.explained <- cumsum(pc.trial$sdev^2/sum(pc.trial$sdev^2))
+
+#scree and variance plot
+pdf("scree_var_wbm.pdf")
+par(mfrow = c(1,2))
+plot(pc.trial, type = "l", main = "Scree Plot")
+plot(var.explained, type = "l", main = "Percent Variance Explained")
+par(mfrow = c(1,1))
+dev.off()
+
+#num.PC <- num of PCs
+
+pca <- function(num.PC, corr.bm){
+pc <- prcomp(corr.bm , rank. = num.PC)
+PC <- mclapply(1:num.PC, function(i) pc[[2]][,i], mc.cores = ncores)
+g <- mclapply(1:num.PC, function(i) function(x) return(PC[[i]]%*%x), 
+              mc.cores = ncores)
+
+chain.scratch <- mclapply(1:num.PC, function(i) apply(chain.new,1,g[[i]]),mc.cores = ncores)
+chain.final <-matrix(unlist(chain.scratch), ncol = num.PC, byrow = FALSE)
+return(chain.final)
+}
+
+chain.PCA <- mclapply(1:5, function(i) pca(i, corr.bm), mc.cores = ncores)
+
+multess <- mclapply(1:5, function(i) multiESS(chain.PCA[[i]]), mc.cores = ncores)
+miness <- mclapply(1:5, function(i) minESS(i, 0.05, 0.05))
+
+out <- do.call(cbind, list(multess, miness))
+colnames(out) <- c("MultiESS", "MinESS")
+out
+
+#3 PC components is appropriate
+#output analysis
+
+pdf("acfplots_pca_wbm.pdf")
+par(mfrow = c(2,3))
+acf(chain.PCA[[3]][,1],main="acf plot for PC1")
+acf(chain.PCA[[3]][,2],main="acf plot for PC2")
+acf(chain.PCA[[3]][,3],main="acf plot for PC3")
+estvssamp(chain.PCA[[3]][,1],main = "PC1 vs sample size")
+estvssamp(chain.PCA[[3]][,2],main = "PC2 vs sample size")
+estvssamp(chain.PCA[[3]][,3],main = "PC3 vs sample size")
+par(mfrow=c(1,1))
+dev.off()
+
+```
+
+
+```{r, message=FALSE, warning=FALSE}
+#sequential stopping rule
+# k variable
+
+y <- mhsampler(Y,5000)[,3]
+est <- mean(y)
+mcse <- sd(y)/sqrt(length(y))
+interval <- est + c(-1,1)*1.96*mcse
+
+eps <- 0.05
+len <- diff(interval)
+out <- c(est, interval)
+
+while (len > eps){
+  y.new <- mhsampler(Y,5000)[,3]
+  y <- cbind(y, y.new)
+  est <- mean(y)
+  mcse <- sd(y)/sqrt(length(y))
+  interval <- est + c(-1,1)*1.96*mcse
+  len <- diff(interval)
+  out <- rbind(out, c(est,interval))
+  
+}
+
+temp <- seq(5000, length(y), 5000)
+
+pdf("stoppingrule.pdf")
+plot(temp, out[,1], type = "l")
+points(temp, out[,2], type = "l", col = "red")
+points(temp, out[,3], type = "l", col = "red")
+dev.off()
+
+```

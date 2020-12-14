@@ -1,0 +1,678 @@
+---
+title: "Metropolis Hasting Change Point"
+author: "Deepak Bastola"
+date: "May 23, 2018"
+output:
+  pdf_document: default
+  word_document: default
+  html_document: default
+---
+
+```{r, message=FALSE, warning=FALSE}
+library(mAr)
+library(mcmcse)
+library(matrixcalc)
+library(mAr)
+library(mcmcse)
+library(matrixcalc)
+library(parallel)
+library(mvtnorm)
+library(Matrix)
+
+```
+
+```{r}
+data <- read.table("/home/deepak/Desktop/Research/MyDissertation/Codes-Research/ChangePoint/changepoint.dat", 
+                   header = TRUE)
+data <- as.matrix(data)
+Y <- data[,2]
+
+mhsampler <- function(Y, n.iterations, kfixed=FALSE){
+    n <- length(Y)
+    mchain <- matrix(NA, n.iterations, 5)
+    acc <- 0 
+    accb1 <- 0
+    accb2 <- 0
+    # starting values
+    k.guess = 15
+
+    c1 = c2 = 0.01
+    d1 = d2 = 100
+    
+    if (kfixed) kinit <- k.guess # start the chain at the guess value
+    else kinit <- n/2 # midpoint
+    mchain[1,] <- c(5,2,kinit,5,5)
+    
+    for (i in 2:n.iterations)
+      {
+        ## parameters at last iterations
+        currtheta <- mchain[i-1,1]
+        currlambda <- mchain[i-1,2]
+        currk <- mchain[i-1,3]
+        currb1 <- mchain[i-1,4]
+        currb2 <- mchain[i-1,5]
+        
+        ## sample from full conditional distribution of theta (Gibbs update)
+        currtheta <- rgamma(1,shape=sum(Y[1:currk])+1.5, 
+                            scale=currb1/(currk*currb1+1))
+        
+        ## sample from full conditional distribution of lambda (Gibbs update)
+        currlambda <- rgamma(1,shape=sum(Y[(currk+1):n])+0.5, 
+                             scale=currb2/((n-currk)*currb2+1))
+        
+        ## sample from full conditional distribution of k (Metropolis-Hastings update)
+        
+      #propk <- runif(1, min=1, n-1 ) # draw one sample at random from uniform{2,..(n-1)}
+      propk = sample(x=seq(2,n-1), size=1)
+      #  propk <- rpois(1,5 )
+        
+        if (kfixed) {
+          currk <- k.guess
+        } else {
+          ## Metropolis accept-reject step (in log scale)
+          
+          prop.poisson <- (currk - propk) + (log(factorial(propk)) - log(factorial(currk))) 
+            
+          logMHratio <- sum(Y[1:propk])*log(currtheta)+sum(Y[(propk+1):n])*
+                        log(currlambda)-propk*currtheta- (n-propk)*currlambda - 
+                            (sum(Y[1:currk])*log(currtheta)+sum(Y[(currk+1):n])*
+                            log(currlambda)-currk*currtheta- (n-currk)*currlambda) 
+          logalpha <- min(0,logMHratio) # alpha = min(1,MHratio)
+          if (log(runif(1))<logalpha) # accept if unif(0,1)<alpha, i.e. accept with
+            {                         # probability alpha, else stay at current state
+              acc <- acc + 1 # increment count of accepted proposals
+              currk <- propk
+            }
+        }
+        
+        ## sample from full conditional distribution of b1 (Metropolis Update)
+        propb1 <- runif(1, min=2, max=20)
+        # propb1 = sample(x=seq(2,n-1), size=1)
+      
+        
+       logalphab1 <- min(0, (c1-1.5)*(log(propb1) -log(currb1)) + currtheta*(1/currb1 - 1/propb1) + (1/d1)*(currb1 - propb1))
+        
+        if (log(runif(1))<logalphab1) # accept if unif(0,1)<alpha, i.e. accept with
+            {                         # probability alpha, else stay at current state
+              accb1 <- accb1 + 1 # increment count of accepted proposals
+              currb1 <- propb1
+        
+         }
+        ## sample from full conditional distribution of b2 (Metropolis Update)
+        propb2 <- runif(1, min=2, max=20)
+      #  propb2 <- sample(x=seq(2,n-1), size=1)
+        
+        logalphab2 <- min(0, (c2-1.5)*(log(propb2) -log(currb2)) + currtheta*(1/currb2 - 1/propb2) + (1/d2)*(currb2 - propb2))
+        if (log(runif(1))<logalphab2) # accept if unif(0,1)<alpha, i.e. accept with
+            {                         # probability alpha, else stay at current state
+              accb2 <- accb2 + 1 # increment count of accepted proposals
+              currb2 <- propb2
+        
+         }
+        
+        ## update chain with new values
+        mchain[i,] <- c(currtheta,currlambda,currk,currb1,currb2)
+      }
+
+    #cat("Markov chain algorithm ran for", MCMCiterations, "iterations ")
+   # if (!kfixed) cat("\n acc. rate for k: ", acc/(MCMCiterations-1))
+    return(mchain)
+  }
+
+n.iterations <- 2e5
+chain <- mhsampler(Y,n.iterations)
+colMeans(chain)
+
+
+chain.good <- chain[1e5:2e5,]
+dens <- density(chain.good[,3], bw = 1.2)
+dens.good <- density(chain.good[,3], from = 10, to = 10, n=1, bw = 1.2)
+
+p.1 = 5
+e.ind.m4q = rep(1,p.1)
+q.ind.m4q = c(rep(.1,p.1),rep(.9,p.1),rep(.025,p.1),rep(.975,p.1))
+col.q.m4q = c(rep(1:p.1,4))
+mbm.G.m4q = mbm.g(chain.good, e.ind.m4q, q.ind.m4q, col.q.m4q, est.type = "BM")
+cov.G.m4q = mbm.G.m4q$Cov
+est.G.m4q = mbm.G.m4q$Est
+m.int.m4q = n.sim.int(Sigma=cov.G.m4q,conf=.9,center=est.G.m4q,
+	epsilon=.001)$ints
+in.cred.ible(chain.good,est.G.m4q,m.int.m4q)
+
+```
+
+
+```{r}
+# lets do this
+# 25 X 25 matrix
+
+# need to track the order of the components
+# 4 quantile positions at each components plus the mean
+# Covariance for mean is the easy part.
+# All components mixed well except k
+
+# Use modified lugsail
+b <- n.iterations^{1/2}
+
+mu.n <- mcse.multi(chain)$est
+
+# interested quantiles that defines 80% and 95% credible regions
+q.points <- c(0.025, 0.1, 0.9, 0.975)
+
+dens <- lapply(1:5, function(i) density(chain[,i], n = 5e5))
+q.values <- lapply(1:5, function(i) quantile(chain[,i], q.points))
+
+dens.est <- lapply(1:4, function(j) sapply(1: 5, function(i) dens[[i]]$y[min(which(dens[[i]]$x >= q.values[[i]][j]))]))
+
+# Need to form a new Markov Chain
+# first five intact
+# add columns component
+#Indicator function, and transformed chain
+ind <- function(x,q) {ifelse(x <= q,1,0)}
+
+chain.q <- lapply(1:4, function(j) sapply(1:5, function(i)  ind(chain[,i], q.values[[i]][j])))
+chain.new <- cbind(chain, do.call(cbind, chain.q))
+
+Sigma.bm <- mcse.multi(chain.new)[[1]]
+Sigma.lbm <- 2*mcse.multi(chain.new, size = b, method = "bm")[[1]] - 2*mcse.multi(chain.new, size = b/3, method = "bm")[[1]]
+Sigma.mlbm <- -1.53*mcse.multi(chain.new, size = b/8, method = "bm")[[1]] + 2.13*mcse.multi(chain.new, size = b/5, method = "bm")[[1]] + 0.40*mcse.multi(chain.new, size = b, method = "bm")[[1]]
+
+
+# next step
+A.h <- diag(unlist(dens.est))
+Lambda <- as.matrix(bdiag(diag(5), A.h))
+# Error matrix from joint CLT using different methods
+Covar.bm <- as.matrix(solve(Lambda)%*%Sigma.bm%*%solve(Lambda))
+Covar.l <- as.matrix(solve(Lambda)%*%Sigma.lbm%*%solve(Lambda))
+Covar.ml <- as.matrix(solve(Lambda)%*%Sigma.mlbm%*%solve(Lambda))
+
+mean <- c(mu.n, unlist(dens.est))
+
+p = 25
+epsilon = 0.001
+
+#bisection algorithm to find the perfect hyper-rectangle
+alpha = 0.10
+
+# Coonfidence region area increasing monotonically in z
+z.lower <- qnorm(1- alpha/2)   # Lower Bound 
+z.upper <- qnorm(1 - alpha/(2*p))   # Upper Bound
+
+# transformation
+x.score <- function(z, sd, mu) {z*sd + mu}
+
+#fx <- function(x, alpha, mean, covar) pmvnorm(lower = -x,  upper = x, mean = mean,  sigma =Covar.ml)[[1]]  - (1-alpha)
+
+fz <- function(z, alpha, mean, covar) { 
+  x.score <- z*sqrt(diag(covar)) + mean
+  conf <- pmvnorm(lower = -x.score,  upper = x.score, mean = mean,  sigma = covar)[[1]]  - (1-alpha) - epsilon
+  return(conf)
+}
+
+# Bisection algorithm : Root finding
+
+bisec <- function(z.lower, z.upper, alpha, covar){
+    
+    gl <- fz(z.lower, alpha, mean, covar)
+    gu <- fz(z.upper, alpha, mean, covar)
+  
+    tol <- 0.0001
+    i = 1
+  while ((z.upper - z.lower) > tol*z.upper ){
+     z.new = (z.lower+z.upper)/2
+      gnew <- fz(z.new, alpha, mean, covar)
+    
+    if (sign(gnew)==sign(gl)) {
+      z.lower = z.new
+      gl <- gnew
+      i = i+1
+    }
+      
+    else {
+      z.upper = gnew
+      gu = gnew
+    }
+   
+  }
+ return(c(z.new)) 
+}
+
+
+min.ml <- bisec(z.lower, z.upper, alpha = 0.10, Covar.ml); min
+min.bm <- bisec(z.lower, z.upper, alpha = 0.10, Covar.bm); min
+
+fz(min.ml, alpha, mean, Covar.ml)
+fz(min.bm, alpha, mean, Covar.bm)
+
+
+x.ml <- x.score(min.ml, sqrt(diag(Covar.ml)), mean)
+x.bm <- x.score(min.bm, sqrt(diag(Covar.bm)), mean)
+
+result.ml <- pmvnorm(lower = -x.ml,  upper = x.ml, mean = mean,  sigma = Covar.ml)[[1]]
+result.bm <- pmvnorm(lower = -x.bm,  upper = x.bm, mean = mean,  sigma = Covar.bm)[[1]]
+
+alphaSI.ml <- 1 - result.ml
+alphaSI.bm <- 1 - result.bm
+
+# Simultaneous batch means
+#Modified Lugsail Batch Means
+n <- nrow(chain.new)
+SI <- lapply(1:25, function(i) mean[i] + c(-1,1)*qnorm(1- alphaSI.ml/2)*sqrt(diag(Covar.bm)[i]/n))
+
+
+
+
+```
+
+```{r}
+# Vizualizations
+
+# Confidence Intervals
+set.seed(1)
+dens <- density(chain[[1]][,1])
+plot(dens)
+#or in one line like this: plot(density(rnorm(100)^2))
+
+q90 <- quantile(chain[[1]][,1], .90)
+q95 <- quantile(chain[[1]][,1], .95)
+
+x1 <- min(which(dens$x >= q90))  
+x2 <- max(which(dens$x <  q95))
+
+#x1 = 6.2
+#x2 = 7.9
+
+with(dens, polygon(x=c(x[c(x1,x1:x2,x2)]), y= c(0, y[x1:x2], 0), col="gray"))
+
+n <- length(dens$y)                       
+dx <- mean(diff(dens$x))                  # Typical spacing in x $
+y.unit <- sum(dens$y) * dx                # Check: this should integrate to 1 $
+dx <- dx / y.unit                         # Make a minor adjustment
+x.mean <- sum(dens$y * dens$x) * dx
+y.mean <- dens$y[length(dens$x[dens$x < x.mean])] #$
+x.mode <- dens$x[i.mode <- which.max(dens$y)]
+y.mode <- dens$y[i.mode]                  #$
+y.cs <- cumsum(dens$y)                    #$
+x.med <- dens$x[i.med <- length(y.cs[2*y.cs <= y.cs[n]])] #$
+y.med <- dens$y[i.med]                                    #$
+
+plot(dens, xlim=c(-2.5,10), type="l", col="green",
+     xlab="x", main="ExGaussian curve",lwd=2)
+temp <- mapply(function(x,y,c) lines(c(x,x), c(0,y), lwd=2, col=c), 
+               c(x.mean, x.med, x.mode), 
+               c(y.mean, y.med, y.mode), 
+               c("Blue", "Gray", "Red"))
+
+
+
+```
+
+
+```{r}
+# Finding the asymptotic covariance matrix
+# Decide on a mean vector
+# Trial
+# Y = (X1, X2, X3 and 2 quantiles (0.10, 0.90) from X3) - % dimensional
+
+# Make a new markov chain matrix
+
+# Estimation of quantiles
+
+# Q-10 quantile
+n <- nrow(chain[[1]])
+q.40 <- quantile(chain[[1]][,2], 0.40)
+q.50 <- quantile(chain[[1]][,2], 0.50)
+
+#Indicator function, and transformed chain
+ind <- function(x,q) {ifelse(x <= q,1,0)}
+
+chainq40 <- ind(chain[[1]][,2], q.40)
+chainq50 <- ind(chain[[1]][,2], q.50)
+
+chain.new <- cbind(chain[[1]], x6 = chainq40, x7 = chainq50)
+
+#estimate Sigma with batch means method
+
+b <- n^(1/2)
+
+#Regular batch means
+Sigma.bm <- mcse.multi(chain.new, size = b, method = "bm")[[1]]
+mean <- mcse.multi(chain.new, size = b, method = "bm")[[3]]
+
+#weighgted batch means
+Sigma.wbm <- 2*mcse.multi(chain.new, size = b, method = "bm")[[1]] - mcse.multi(chain.new, size = b/2, method = "bm")[[1]]
+
+#Lugsail batch means
+Sigma.lbm <- 2*mcse.multi(chain.new, size = b, method = "bm")[[1]] - 2*mcse.multi(chain.new, size = b/3, method = "bm")[[1]]
+
+#Modified Lugsail
+Sigma.mlbm <- -1.53*mcse.multi(chain.new, size = b/8, method = "bm")[[1]] + 2.13*mcse.multi(chain.new, size = b/5, method = "bm")[[1]] + 0.40*mcse.multi(chain.new, size = b, method = "bm")[[1]]
+
+# ok, now figure out the Lambda matrix
+# Diagonals of the estimated density at the chosen quantile
+
+dens <- density(chain[[1]][,2])
+x1 <- min(which(dens$x >= q.40)) 
+f.q1 <- dens$y[x1]
+
+x2 <- min(which(dens$x >= q.50)) 
+f.q2 <- dens$y[x2]
+
+A.h <- diag(c(f.q1,f.q2))
+
+Lambda <- as.matrix(bdiag(diag(5), A.h))
+
+Covar.bm <- as.matrix(solve(Lambda)%*%Sigma.bm%*%solve(Lambda))
+Covar.wbm <- as.matrix(solve(Lambda)%*%Sigma.wbm%*%solve(Lambda))
+Covar.l <- as.matrix(solve(Lambda)%*%Sigma.lbm%*%solve(Lambda))
+Covar.ml <- as.matrix(solve(Lambda)%*%Sigma.mlbm%*%solve(Lambda))
+
+pmfmvn <- function(m, mean, covar) pmvnorm(lower = c(rep(-Inf,7)), upper = c(rep(m,7)), mean = mean,  sigma = covar)
+
+pmfmvn(2,mean, Covar.bm)
+
+```
+
+
+```{r}
+#out <- as.matrix(mAr.sim(rep(0,p), phi, omega, N = n))
+
+#b <- floor(sqrt(nrow(out)))
+#sigma.bm <- mcse.multi(x = out)[[1]]
+#sigma.wbm <- 2* mcse.multi(out, method = "bartlett", size = b)[[1]] - mcse.multi(out, method = "bartlett", size = b/2)[[1]]
+#corr.wbm <-  cov2cor(sigma.wbm)
+#eigen.wbm <- eigen(corr.wbm)[[1]]
+
+out<- scale(chain, center = TRUE, scale = FALSE)
+n <- 1000
+t.out <- t(out)
+x <- as.vector(t.out)
+dn <- length(x)
+D <- matrix(x, nrow = dn, ncol = 1)
+
+#covariance matrix
+#T.dn <- (1/(n))*D%*%t(D)
+#not a consistent estimator
+
+y <- acf(out, lag.max = n-1, type = "covariance", plot = FALSE)
+autocov <- y$acf 
+
+#define tapered function
+taper <- function(x){
+  if (abs(x)<=1){res <- 1}
+  if (abs(x)>1 & abs(x)<=2){res <- 2 - abs(x)}
+  if (abs(x)>2){res <- 0}
+  return(res)
+}
+
+#calculate k_l
+l = 2
+k.l <-lapply(1:n, function(i) taper((i-1)/l))
+T.kl <-lapply(1:n, function(i) autocov[i,,]*k.l[[i]])
+
+toeplitz.block <- function(blocks) {
+    l <- length(blocks)
+    m.str <- toeplitz(1:l)
+
+    res <- lapply(1:l,function(k) {
+        res <- matrix(0,ncol=ncol(m.str),nrow=nrow(m.str))
+        res[m.str == k] <- 1
+        res %x% blocks[[k]]
+    })
+
+    Reduce("+",res)
+}  
+
+T.kl.mat <- toeplitz.block(T.kl)
+xx <- diag(T.kl.mat)
+V.mat <- diag(xx, dn, dn)
+
+R.kl <- solve(V.mat)^(1/2)%*%T.kl.mat%*%solve(V.mat)^(1/2)
+
+#spectral factorization
+R.eigen <- eigen(R.kl)
+eigenvec <- R.eigen$vectors
+
+#adjustment
+eps <- 1
+beta <- 1
+r.i <- R.eigen$values
+r.ie <- sapply(1:dn, function(i) max(r.i[i], eps*n^{-beta}))
+
+T.kle <- sqrt(V.mat)%*%(eigenvec%*%diag(r.ie, dn, dn)%*%t(eigenvec))%*%sqrt(V.mat)
+
+```
+
+
+
+
+
+```{r}
+
+pdf("tsplot.pdf")
+ts.plot(Y,main="Time series plot of change point data", lty=3)
+dev.off()
+
+bm.est <- apply(chain, 2, function(i) bm(i)$est)
+bm.est
+
+bm.se <- apply(chain, 2, function(i) bm(i)$se)
+bm.se
+
+#standard errors - cov mat
+mcse.matrix <- mcse.mat(chain)
+mcse.matrix
+
+#effective sample size
+ess <- lapply(1:5, function(i) ess(chain[,i]))
+ess
+
+#relative tolerance eps = 0.05
+miness <- minESS(p=5, eps = 0.05, alpha = 0.05)
+miness
+
+#multivariate sample size
+multess <- multiESS(chain)
+multess
+
+chain.new <- mhsampler(Y, 32000)
+
+#recalculate ess
+multess.final <- multiESS(chain.new)
+multess.final
+
+pdf("acfplots.pdf")
+par(mfrow = c(3,2))
+acf(chain.new[,1],main="acf plot for theta")
+acf(chain.new[,2],main="acf plot for lambda")
+acf(chain.new[,3],main="acf plot for k")
+acf(chain.new[,4],main="acf plot for b1")
+acf(chain.new[,5],main="acf plot for b2")
+par(mfrow=c(1,1))
+dev.off()
+
+#estimates with their standard errors
+mcse.matrix <- mcse.mat(chain.new)
+mcse.matrix
+
+#output analysis
+```
+
+```{r}
+#batch means
+sigma.bm <- mcse.multi(chain.new)
+sigma.bm[[1]]
+corr.bm <- cov2cor(sigma.bm[[1]])
+corr.bm
+eigen.bm <- eigen(corr.bm)[[1]]
+
+#weighted batch means
+b <- floor(sqrt(nrow(chain.new)))
+sigma.wbm <- 2* mcse.multi(chain.new, method = "bartlett", size = b)[[1]]- mcse.multi(chain.new, method = "bartlett", size = b/2)[[1]]
+sigma.wbm
+corr.wbm <- cov2cor(sigma.wbm)
+corr.wbm
+eigen.wbm <- eigen(corr.wbm)[[1]]
+
+#shrink estimation
+nlinshrink_X <-  nlshrink_cov(chain.new)
+corr.shrink <- cov2cor(nlinshrink_X)
+eigen.shrink <- eigen(corr.shrink)[[1]]
+
+pdf("eigen.pdf")
+plot(eigen.shrink, type = 'l', col = 1, lty = 1, ylim = c(0, 3))
+lines(eigen.bm, col =2, lty =2)
+lines(eigen.wbm, col =3, lty = 3)
+legend("topright", col = c(1,2,3), legend = c("Shrinked", "Batch Means", "wBatch Means"), lty = c(1,2,3))
+dev.off()
+
+```
+
+
+```{r}
+#non-linear shrinkage
+linshrink_X <- linshrink_cov(chain.new)
+nlinshrink_X <-  nlshrink_cov(chain.new)
+corr.shrink <- cov2cor(nlinshrink_X)
+
+#Principal Components with shrinked estimator
+ncores <- detectCores()
+pc.shrink <- prcomp(corr.shrink)
+
+# components and explained variances
+var.shrink <- cumsum(pc.shrink$sdev^2/sum(pc.shrink$sdev^2))
+
+#scree and variance plot
+pdf("scree_var_shrink.pdf")
+par(mfrow = c(1,2))
+plot(pc.shrink, type = "l", main = "Scree Plot")
+plot(var.shrink, type = "l", main = "Percent Variance Explained")
+par(mfrow = c(1,1))
+dev.off()
+
+#num.PC <- num of PCs
+
+pca.shrink <- function(num.PC, corr.shrink){
+pc <- prcomp(corr.shrink , rank. = num.PC)
+PC <- mclapply(1:num.PC, function(i) pc[[2]][,i], mc.cores = ncores)
+g <- mclapply(1:num.PC, function(i) function(x) return(PC[[i]]%*%x), 
+              mc.cores = ncores)
+
+chain.scratch <- mclapply(1:num.PC, function(i) apply(chain.new,1,g[[i]]),mc.cores = ncores)
+chain.final <-matrix(unlist(chain.scratch), ncol = num.PC, byrow = FALSE)
+return(chain.final)
+}
+
+chain.PCA.shrink <- mclapply(1:5, function(i) pca.shrink(i, corr.shrink), mc.cores = ncores)
+
+multess <- mclapply(1:5, function(i) multiESS(chain.PCA.shrink[[i]]), mc.cores = ncores)
+miness <- mclapply(1:5, function(i) minESS(i, 0.05, 0.05))
+
+out <- do.call(cbind, list(multess, miness))
+colnames(out) <- c("MultiESS", "MinESS")
+out
+
+#3 PC components is appropriate
+#output analysis
+
+pdf("acfplots_pca_shrink.pdf")
+par(mfrow = c(2,3))
+acf(chain.PCA.shrink[[3]][,1],main="acf plot for PC1")
+acf(chain.PCA.shrink[[3]][,2],main="acf plot for PC2")
+acf(chain.PCA.shrink[[3]][,3],main="acf plot for PC3")
+estvssamp(chain.PCA.shrink[[3]][,1],main = "PC1 vs sample size")
+estvssamp(chain.PCA.shrink[[3]][,2],main = "PC2 vs sample size")
+estvssamp(chain.PCA.shrink[[3]][,3],main = "PC3 vs sample size")
+par(mfrow=c(1,1))
+dev.off()
+
+```
+
+```{r, message=FALSE, warning=FALSE}
+#Principal Component Analysis
+ncores <- detectCores()
+pc.trial <- prcomp(corr.wbm)
+
+# components and explained variances
+var.explained <- cumsum(pc.trial$sdev^2/sum(pc.trial$sdev^2))
+
+#scree and variance plot
+pdf("scree_var_wbm.pdf")
+par(mfrow = c(1,2))
+plot(pc.trial, type = "l", main = "Scree Plot")
+plot(var.explained, type = "l", main = "Percent Variance Explained")
+par(mfrow = c(1,1))
+dev.off()
+
+#num.PC <- num of PCs
+
+pca <- function(num.PC, corr.bm){
+pc <- prcomp(corr.bm , rank. = num.PC)
+PC <- mclapply(1:num.PC, function(i) pc[[2]][,i], mc.cores = ncores)
+g <- mclapply(1:num.PC, function(i) function(x) return(PC[[i]]%*%x), 
+              mc.cores = ncores)
+
+chain.scratch <- mclapply(1:num.PC, function(i) apply(chain.new,1,g[[i]]),mc.cores = ncores)
+chain.final <-matrix(unlist(chain.scratch), ncol = num.PC, byrow = FALSE)
+return(chain.final)
+}
+
+chain.PCA <- mclapply(1:5, function(i) pca(i, corr.bm), mc.cores = ncores)
+
+multess <- mclapply(1:5, function(i) multiESS(chain.PCA[[i]]), mc.cores = ncores)
+miness <- mclapply(1:5, function(i) minESS(i, 0.05, 0.05))
+
+out <- do.call(cbind, list(multess, miness))
+colnames(out) <- c("MultiESS", "MinESS")
+out
+
+#3 PC components is appropriate
+#output analysis
+
+pdf("acfplots_pca_wbm.pdf")
+par(mfrow = c(2,3))
+acf(chain.PCA[[3]][,1],main="acf plot for PC1")
+acf(chain.PCA[[3]][,2],main="acf plot for PC2")
+acf(chain.PCA[[3]][,3],main="acf plot for PC3")
+estvssamp(chain.PCA[[3]][,1],main = "PC1 vs sample size")
+estvssamp(chain.PCA[[3]][,2],main = "PC2 vs sample size")
+estvssamp(chain.PCA[[3]][,3],main = "PC3 vs sample size")
+par(mfrow=c(1,1))
+dev.off()
+
+```
+
+
+```{r, message=FALSE, warning=FALSE}
+#sequential stopping rule
+# k variable
+
+y <- mhsampler(Y,5000)[,3]
+est <- mean(y)
+mcse <- sd(y)/sqrt(length(y))
+interval <- est + c(-1,1)*1.96*mcse
+
+eps <- 0.05
+len <- diff(interval)
+out <- c(est, interval)
+
+while (len > eps){
+  y.new <- mhsampler(Y,5000)[,3]
+  y <- cbind(y, y.new)
+  est <- mean(y)
+  mcse <- sd(y)/sqrt(length(y))
+  interval <- est + c(-1,1)*1.96*mcse
+  len <- diff(interval)
+  out <- rbind(out, c(est,interval))
+  
+}
+
+temp <- seq(5000, length(y), 5000)
+
+pdf("stoppingrule.pdf")
+plot(temp, out[,1], type = "l")
+points(temp, out[,2], type = "l", col = "red")
+points(temp, out[,3], type = "l", col = "red")
+dev.off()
+
+```
