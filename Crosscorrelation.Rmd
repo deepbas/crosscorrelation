@@ -1,0 +1,282 @@
+---
+title: "Time Series Cross-Correlation"
+author: "Deepak Bastola"
+date: "January 3, 2019"
+output:
+  pdf_document: default
+  html_document:
+    df_print: paged
+header-includes:
+- \usepackage{bbm}
+- \usepackage{amsmath}
+---
+
++ VAR(1) model: 
+
+\[
+Y_t = \Phi \cdot Y_{t-1} + \epsilon_t, \qquad \text{where} \quad \epsilon_t \sim N(0, \Omega)
+\]
+
++ Consider estimating $\bar{Y}_n$. The Yule- Walker Equations are,
+$$
+\begin{split}
+\Gamma (0) &= \Phi \cdot \Gamma(1)' + \Omega \\
+\Gamma (k) &= \Phi \cdot \Gamma(k-1), \qquad k = 1,2,3,......
+\end{split}
+$$
+
++ Wold Decomposition:
+$$
+vec(\Gamma(0)) = (I_{p^2} - \Phi \otimes \Phi)^{-1} \cdot vec(\Omega)
+$$
+
++ Var-Correlation Decomposition:
+
+$$
+\begin{split}
+D &= diag(\Gamma(0)) \\
+R(h) &= D^{-\frac{1}{2}} \cdot \Gamma(h) \cdot D^{-\frac{1}{2}} 
+\end{split}
+$$
+
++ Let $V = \Gamma(0)$, then,
+$$
+\Sigma = (I_p - \Phi)^{-1} \cdot V + V (I_p - \Phi)^{-1} - V
+$$
+
++ From Markov Chain CLT, we have,
+
+\begin{align*}
+\Sigma = \text{Var}_{\pi}(Y_1) + \sum_{k=1}^{\infty}[\text{Cov}_F(Y_1, Y_{1+k}) + \text{Cov}_F(Y_1,Y_{1+k})^T]. 
+\end{align*}
+
++ MA($\infty$) representation of VAR(1) model,
+
+$$
+\begin{split}
+Y_t &= \Phi \cdot Y_{t-1} + \epsilon_t\\
+(I - \Phi L)Y_t &= \epsilon_t \\
+Y_t &= (I - \Phi L)^{-1} \cdot \epsilon_t \\
+Y_t &= \sum_{q = 0}^{\infty} \Phi_q \cdot \epsilon_{t-q}
+\end{split}
+$$
+
++ Then,
+
+$$
+\begin{split}
+Cov(Y_t) = Cov\bigg(\sum_{q = 0}^{\infty} \Phi_q \cdot \epsilon_{t-q}\bigg) = \sum_{q = 0}^{\infty} \Phi_q \Omega \Phi_q^T 
+\end{split}
+$$
+
++ The correlation between $Y_i$ and $Y_j$ can be simply obtained by the transformation,
+
+$$
+R_{Y,ij} = \frac{\sigma_{Y,ij}}{\sqrt{\sigma_{Y,ii} \cdot \sigma_{Y,jj}}}
+$$
+
++ To check the convergence rate of $R(h)$, we can do the following computation:
+
+$$
+\begin{split}
+\Gamma(h) &= \Phi \Gamma_{h-1} = \Phi^h \Gamma_0 \\
+R(h) &=  D^{-\frac{1}{2}} \cdot \Gamma(h) \cdot D^{-\frac{1}{2}} \\
+&= D^{-\frac{1}{2}} \cdot \Phi\Gamma(h-1) \cdot D^{-\frac{1}{2}}\\
+&= D^{-\frac{1}{2}} \cdot \Phi \cdot D^{-\frac{1}{2}}\cdot D^{\frac{1}{2}} \cdot \Gamma(h-1) \cdot D^{-\frac{1}{2}}\\
+&= \Psi \cdot R(h-1) \\
+&= \Psi^h \cdot R(0)
+\end{split}
+$$
+
+where $\Psi = D^{-\frac{1}{2}} \cdot \Phi \cdot D^{-\frac{1}{2}}$. It can be seen that the correlation decay follows a power law.
+
+
+# Some Examples
+
+
+```{r, message=FALSE, warning=FALSE}
+set.seed(123)
+library(mAr)
+library(Matrix)
+library(mcmcse)
+library(matrixcalc)
+library(coda)
+library(Matrix)
+
+```
+
+#
+
+1. Bivariate VAR(1) with general correlation structure ($\Phi$).
+
+```{r, message=FALSE, warning=FALSE}
+p=2
+n = 1000
+omega <- diag(2)
+Phi <- matrix(c(0.7, 0.1, 0.1, 0.5),2,2)
+scratch <- diag(p^2) - kronecker(Phi,Phi)
+V.s <- solve(scratch)%*%vec(omega)
+
+Tau0 <- matrix(V.s, nrow = p, byrow = TRUE)
+Tau0
+
+D <- diag(diag(Tau0))
+Sigma <- solve(diag(p)-Phi)%*%Tau0 + Tau0%*%solve(diag(p)-Phi) -Tau0
+Sigma.d <- diag(diag(Sigma))
+R.main <- solve(sqrt(Sigma.d))%*%Sigma%*%solve(sqrt(Sigma.d))
+
+
+main <- solve(sqrt(D))%*%Sigma%*%solve(sqrt(D))
+
+Tau1 <- Phi%*%Tau0
+Tau2 <- Phi%*%Tau1
+Tau3 <- Phi%*%Tau2
+Tau4 <- Phi%*%Tau3
+Tau5 <- Phi%*%Tau4
+
+
+Rho0 <- solve(sqrt(D))%*%Tau0%*%solve(sqrt(D))
+
+Rho1 <- solve(sqrt(D))%*%Tau1%*%solve(sqrt(D)) 
+Rho2 <- solve(sqrt(D))%*%Tau2%*%solve(sqrt(D)) 
+Rho3 <- solve(sqrt(D))%*%Tau3%*%solve(sqrt(D)) 
+Rho4 <- solve(sqrt(D))%*%Tau4%*%solve(sqrt(D)) 
+Rho5 <- solve(sqrt(D))%*%Tau5%*%solve(sqrt(D))
+
+psi.h <- solve(sqrt(D))%*%Phi%*%(sqrt(D))
+
+# Markov Chain
+chain <- as.matrix(mAr.sim(rep(0,p), Phi, omega, N = n))
+
+aa <- ccf(chain[,1], chain[,2], type = "correlation", plot = TRUE, lag.max = 100)
+```
+
+#
+There is significant cross-correlation at large lags. There should be some tests in the literature to say if the cross-correlation decays geometrically, or follows some power law. 
+
+#
+
+```{r}
+Tau1 <- Phi%*%Tau0
+Tau2 <- Phi%*%Tau1
+Tau3 <- Phi%*%Tau2
+Tau4 <- Phi%*%Tau3
+Tau5 <- Phi%*%Tau4
+
+D <- diag(diag(Tau0));D
+
+Rho0 <- solve(sqrt(D))%*%Tau0%*%solve(sqrt(D)) ;Rho0
+Rho1 <- solve(sqrt(D))%*%Tau1%*%solve(sqrt(D)) ;Rho1
+Rho2 <- solve(sqrt(D))%*%Tau2%*%solve(sqrt(D)) ;Rho2
+Rho3 <- solve(sqrt(D))%*%Tau3%*%solve(sqrt(D)) ;Rho3
+Rho4 <- solve(sqrt(D))%*%Tau4%*%solve(sqrt(D)) ;Rho4
+Rho5 <- solve(sqrt(D))%*%Tau5%*%solve(sqrt(D)) ;Rho5
+
+```
+
+#
+
+2. If we model the VAR(1) as VMA process then we can get few non-zero cross-correlations. I don't know if this helps.
+
+#
+
+```{r, message=FALSE, warning=FALSE}
+# Example 2: 
+p=2
+omega <- matrix(c(1,0.1,0.1,1),2,2)
+Phi <- matrix(c(0.5, 0, 0, 0.2),2,2)
+scratch <- diag(p^2) - kronecker(Phi,Phi)
+V.s <- solve(scratch)%*%vec(omega)
+
+Tau0 <- matrix(V.s, nrow = p, byrow = TRUE)
+Sigma <- solve(diag(p)-Phi)%*%Tau0 + Tau0%*%solve(diag(p)-Phi) -Tau0
+
+
+# Markov Chain
+chain <- as.matrix(mAr.sim(rep(0,p), Phi, omega, N = n))
+aa <- ccf(chain[,1], chain[,2], type = "correlation", plot = TRUE, lag.max = 100)
+
+```
+
+#
+
+There are only 2 significant cross-correlation terms.
+
+#
+
+3. I can extend this to higher dimensions.
+
+```{r, message=FALSE, warning=FALSE}
+p=3
+omega <- matrix(c(1,0,0,0,1,0,0,0,1),3,3)
+Phi <- matrix(c(0.3,0.3,0.3,0.6,0,0,0.8,0.6,0),3,3)
+
+scratch <- diag(p^2) - kronecker(Phi,Phi)
+V.s <- solve(scratch)%*%vec(omega)
+Tau0 <- matrix(V.s, nrow = p, byrow = TRUE)
+
+# Markov Chain
+chain <- as.matrix(mAr.sim(rep(0,p), Phi, omega, N = n))
+
+par(mfrow = c(1,2))
+aa <- ccf(chain[,1], chain[,2], type = "correlation", plot = TRUE, lag.max = 100)
+bb <- ccf(chain[,1], chain[,3], type = "correlation", plot = TRUE, lag.max = 100)
+par(mfrow = c(1,1))
+
+```
+
+#
+
+4. General correlation structure at low correlation. 
+
+#
+
+```{r, message=FALSE, warning=FALSE}
+p=3
+omega <- matrix(c(1,0,0,0,1,0,0,0,1),3,3)
+
+A <- matrix(rnorm(p*p,mean=0,sd=1), p, p)
+B <- A%*%t(A)
+m <- max(eigen(B)$values)
+phi0 <- B/(m+0.001)
+Phi <- 0.50*phi0
+
+scratch <- diag(p^2) - kronecker(Phi,Phi)
+V.s <- solve(scratch)%*%vec(omega)
+Tau0 <- matrix(V.s, nrow = p, byrow = TRUE)
+
+# Markov Chain
+chain <- as.matrix(mAr.sim(rep(0,p), Phi, omega, N = n))
+aa <- ccf(chain[,1], chain[,2], type = "correlation", plot = TRUE, lag.max = 100)
+bb <- ccf(chain[,1], chain[,3], type = "correlation", plot = TRUE, lag.max = 100)
+
+```
+
+#
+
+5. General correlation structure at high correlation. 
+
+#
+
+
+```{r}
+# Example 3: 3-dim, High correlation
+p=3
+omega <- matrix(c(1,0,0,0,1,0,0,0,1),3,3)
+
+A <- matrix(rnorm(p*p,mean=0,sd=1), p, p)
+B <- A%*%t(A)
+m <- max(eigen(B)$values)
+phi0 <- B/(m+0.001)
+Phi <- 0.90*phi0
+
+scratch <- diag(p^2) - kronecker(Phi,Phi)
+V.s <- solve(scratch)%*%vec(omega)
+Tau0 <- matrix(V.s, nrow = p, byrow = TRUE)
+
+# Markov Chain
+chain <- as.matrix(mAr.sim(rep(0,p), Phi, omega, N = n))
+aa <- ccf(chain[,1], chain[,2], type = "correlation", plot = TRUE, lag.max = 100)
+bb <- ccf(chain[,1], chain[,3], type = "correlation", plot = TRUE, lag.max = 100)
+
+```
